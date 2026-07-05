@@ -1,0 +1,9 @@
+[package]
+name = "miuchiz-reborn-paths"
+version = "0.1.0"
+edition = "2021"
+description = "Shared on-disk storage location policy for Miuchiz Reborn applications."
+license = "MIT"
+
+[dependencies]
+directories = "6"
