@@ -16,6 +16,17 @@
 //! one directory (`<home>/{config,data,cache,state,runtime}/<app>`) for
 //! portable installs and tests.
 //!
+//! **Android** is different in kind, and deliberately absent from that table:
+//! an app does not *discover* its storage, the system hands it a private root.
+//! So there is no `AppDirs::new` there — only [`AppDirs::new_in`], which
+//! lays the categories out under the supplied root exactly as
+//! `MIUCHIZ_REBORN_HOME` does. No umbrella directory is inserted: the app
+//! sandbox already provides the isolation the umbrella provides elsewhere.
+//! One wrinkle to know about — `cache` is then a subdirectory of the app's
+//! files directory, *not* the OS-evictable `Context.getCacheDir()`, which
+//! nothing here can reach without JNI. If eviction semantics start to matter,
+//! a `new_in` variant taking a separate cache root is the place to add them.
+//!
 //! The runtime category is for per-boot rendezvous files (sockets, endpoint
 //! files, pids): the OS runtime directory where one exists (Linux
 //! `$XDG_RUNTIME_DIR` - per-user, tmpfs, cleared at logout), else the system
@@ -28,14 +39,19 @@
 
 use std::path::{Path, PathBuf};
 
+#[cfg(not(target_os = "android"))]
 use directories::BaseDirs;
 
+#[cfg(not(target_os = "android"))]
 const UMBRELLA_HUMAN: &str = "Miuchiz Reborn";
+#[cfg(not(target_os = "android"))]
 const UMBRELLA_XDG: &str = "miuchiz-reborn";
 
 /// Reroots every category under one directory (portable installs, tests).
 pub const ENV_HOME: &str = "MIUCHIZ_REBORN_HOME";
 
+/// Desktop-only: unreachable on Android, where `AppDirs::new` does not exist.
+#[cfg(not(target_os = "android"))]
 fn umbrella() -> &'static str {
     if cfg!(any(target_os = "macos", target_os = "windows")) {
         UMBRELLA_HUMAN
@@ -56,18 +72,49 @@ pub struct AppDirs {
 }
 
 impl AppDirs {
-    /// Resolve directories for `app` (a plain slug like `"launcher"`).
+    /// Resolve directories for `app` (a plain slug like `"launcher"`) from the
+    /// environment.
     ///
     /// Falls back to a local `./.miuchiz-reborn` tree when there is no home
     /// directory and no [`ENV_HOME`] override.
+    ///
+    /// **Not available on Android**, where there is no environment-determined
+    /// answer: an app's storage root is handed to it by the system at runtime,
+    /// and every fallback this function has would resolve outside the app
+    /// sandbox and be unwritable — silently, since this function cannot fail.
+    /// Use [`AppDirs::new_in`] with the root the platform supplied.
+    #[cfg(not(target_os = "android"))]
     pub fn new(app: impl Into<String>) -> Self {
         let app = app.into();
-        debug_assert!(!app.is_empty(), "app name must not be empty");
-        debug_assert!(
-            !app.contains(['/', '\\']),
-            "app name must be a plain slug, not a path"
-        );
+        debug_assert_valid_app(&app);
         let [config, data, cache, state, runtime] = resolve(&app);
+        Self {
+            app,
+            config,
+            data,
+            cache,
+            state,
+            runtime,
+        }
+    }
+
+    /// Resolve directories for `app` under one explicit `root`, laid out as
+    /// `<root>/{config,data,cache,state,runtime}/<app>` — the same shape
+    /// [`ENV_HOME`] produces.
+    ///
+    /// For platforms that hand an application its storage root rather than
+    /// letting it discover one (Android's `Context.getFilesDir()`), and for
+    /// portable installs and tests that want a location with no environmental
+    /// input at all.
+    ///
+    /// Deliberately **literal**: unlike `AppDirs::new` this does not consult
+    /// [`ENV_HOME`]. An explicitly supplied root is a stronger statement than
+    /// an ambient variable, and tests — the other caller — need it
+    /// deterministic.
+    pub fn new_in(root: impl AsRef<Path>, app: impl Into<String>) -> Self {
+        let app = app.into();
+        debug_assert_valid_app(&app);
+        let [config, data, cache, state, runtime] = single_root_layout(root.as_ref(), &app);
         Self {
             app,
             config,
@@ -115,6 +162,15 @@ pub fn ensure(dir: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)
 }
 
+fn debug_assert_valid_app(app: &str) {
+    debug_assert!(!app.is_empty(), "app name must not be empty");
+    debug_assert!(
+        !app.contains(['/', '\\']),
+        "app name must be a plain slug, not a path"
+    );
+}
+
+#[cfg(not(target_os = "android"))]
 fn resolve(app: &str) -> [PathBuf; 5] {
     if let Some(home) = std::env::var_os(ENV_HOME).filter(|v| !v.is_empty()) {
         return single_root_layout(Path::new(&home), app);
@@ -143,6 +199,7 @@ fn resolve(app: &str) -> [PathBuf; 5] {
 }
 
 /// `[config, data, cache, state]` as `<root>/<umbrella>/<app>` per OS root.
+#[cfg(not(target_os = "android"))]
 fn os_layout(config: &Path, data: &Path, cache: &Path, state: &Path, app: &str) -> [PathBuf; 4] {
     let umb = umbrella();
     let leaf = |root: &Path| root.join(umb).join(app);
@@ -176,6 +233,39 @@ mod tests {
         assert_eq!(dirs[4], Path::new("/portable/mr/runtime/launcher"));
     }
 
+    /// The public face of the single-root layout, and the only constructor
+    /// Android has. Runs everywhere: the layout is one shared rule, so a change
+    /// that breaks Android should fail the desktop suite too.
+    #[test]
+    fn new_in_lays_out_under_the_given_root() {
+        let dirs = AppDirs::new_in("/data/user/0/com.example/files", "audoboom");
+        let root = Path::new("/data/user/0/com.example/files");
+        assert_eq!(dirs.app(), "audoboom");
+        assert_eq!(dirs.config_dir(), root.join("config/audoboom"));
+        assert_eq!(dirs.data_dir(), root.join("data/audoboom"));
+        assert_eq!(dirs.cache_dir(), root.join("cache/audoboom"));
+        assert_eq!(dirs.state_dir(), root.join("state/audoboom"));
+        assert_eq!(dirs.runtime_dir(), root.join("runtime/audoboom"));
+    }
+
+    /// Serialises the tests that mutate process-wide environment variables.
+    /// Cargo runs tests on parallel threads and `set_var` is global, so without
+    /// this the two below race over [`ENV_HOME`]. Poisoning is recovered from:
+    /// a panic in one test should fail that test, not cascade into the other.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// `new_in` is literal: an explicitly supplied root outranks the ambient
+    /// override, or tests could not rely on it.
+    #[test]
+    fn new_in_ignores_env_home() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var(ENV_HOME, "/should/be/ignored");
+        let dirs = AppDirs::new_in("/explicit", "audoboom");
+        assert_eq!(dirs.config_dir(), Path::new("/explicit/config/audoboom"));
+        std::env::remove_var(ENV_HOME);
+    }
+
+    #[cfg(not(target_os = "android"))]
     #[test]
     fn os_layout_inserts_umbrella_and_app() {
         let dirs = os_layout(
@@ -195,8 +285,16 @@ mod tests {
 
     /// Runs the shared conformance suite (test-vectors.txt) - the same file
     /// other-language implementations of this policy test against.
+    ///
+    /// Not built on Android: every vector resolves through `AppDirs::new`,
+    /// which does not exist there. Android's layout is not unspecified as a
+    /// result — it is the single-root layout the `MIUCHIZ_REBORN_HOME` vectors
+    /// already pin, exercised by `new_in_lays_out_under_the_given_root` above,
+    /// which does run there.
+    #[cfg(not(target_os = "android"))]
     #[test]
     fn conformance_vectors() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let vectors = include_str!("../test-vectors.txt");
         let this_platform = if cfg!(target_os = "macos") {
             "macos"
@@ -248,6 +346,7 @@ mod tests {
         std::env::remove_var(ENV_HOME);
     }
 
+    #[cfg(not(target_os = "android"))]
     #[test]
     fn umbrella_is_human_or_xdg_per_os() {
         let expected = if cfg!(any(target_os = "macos", target_os = "windows")) {

@@ -8,6 +8,7 @@
 #   <platforms>|<env>|<category>|<app>|<expected>
 #
 #   platforms: which OS the vector applies to: all, linux, macos, windows
+#              (Android is deliberately absent — see the note below)
 #   env:       comma-separated KEY=VALUE assignments applied before resolving;
 #              a bare "KEY=" means the variable must be unset
 #   category:  config | data | cache | state | runtime
@@ -17,6 +18,14 @@
 # Windows. Vectors avoid depending on HOME or the OS known-folder locations;
 # only behavior that is fully determined by the listed variables is specified
 # here, which is exactly the behavior implementations must agree on.
+#
+# Android has no vectors, and needs none. Every vector resolves from the
+# environment, but on Android an app is *handed* its private root by the system
+# rather than discovering one, so there is nothing environmental to specify --
+# the root arrives as an argument, which this format has no column for. The
+# layout applied to that root is not a new rule: it is exactly the single-root
+# layout the MIUCHIZ_REBORN_HOME vectors below already pin. An implementation
+# that passes those has implemented Android's layout too.
 
 # --- MIUCHIZ_REBORN_HOME reroots every category: <home>/<category>/<app> ---
 all|MIUCHIZ_REBORN_HOME=/mr|config|launcher|/mr/config/launcher

@@ -1,9 +1,11 @@
 [package]
 name = "miuchiz-reborn-paths"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "Shared on-disk storage location policy for Miuchiz Reborn applications."
 license = "MIT"
 
-[dependencies]
+# Only the environment-discovery path uses this, and that path does not exist
+# on Android (see `AppDirs::new`), so the dependency does not either.
+[target.'cfg(not(target_os = "android"))'.dependencies]
 directories = "6"

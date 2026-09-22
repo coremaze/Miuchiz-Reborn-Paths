@@ -38,6 +38,18 @@ machine, because you want settings and saves to survive moving or reinstalling.
 Set `MIUCHIZ_REBORN_HOME` to reroot every category under one directory.
 (`<home>/{config,data,cache,state,runtime}/<app>`)
 
+### Android and explicit roots
+
+Android supplies the app-private root at runtime. Use
+`AppDirs::new_in(root, "audoboom")` to resolve
+`<root>/{config,data,cache,state,runtime}/audoboom`.
+This constructor is available on every platform and ignores
+`MIUCHIZ_REBORN_HOME`. It resolves paths; callers create directories as needed.
+
+`AppDirs::new` and environment-based discovery are unavailable on Android.
+When the supplied root is Android's files directory, the cache subdirectory is
+not the OS-evictable `Context.getCacheDir()`.
+
 ### Other implementations
 
 This layout is a specification, not just a crate: implementations in other
